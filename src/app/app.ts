@@ -1,4 +1,5 @@
-import { Component, signal } from '@angular/core';
+import { Component } from '@angular/core';
+import { LoadingService } from './services/loading.service';
 
 @Component({
   selector: 'app-root',
@@ -7,5 +8,9 @@ import { Component, signal } from '@angular/core';
   styleUrl: './app.css'
 })
 export class App {
-  protected readonly title = signal('FinanzasIso');
+  constructor(private loadingService: LoadingService) {}
+
+  public get isLoading$() {
+    return this.loadingService.loading$;
+  }
 }
