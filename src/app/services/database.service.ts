@@ -1,331 +1,427 @@
-import { Injectable, Inject, PLATFORM_ID } from '@angular/core';
 import { isPlatformBrowser } from '@angular/common';
+import { Inject, Injectable, PLATFORM_ID } from '@angular/core';
+import initSqlJs, { Database, SqlValue } from 'sql.js';
 
-const STORAGE_KEY = 'finanzas_cheques_db_v2';
+const SQLITE_STORAGE_KEY = 'finanzas_cheques_db';
+const LEGACY_STORAGE_KEY = 'finanzas_cheques_db_v2';
+const INDEXED_DB_NAME = 'finanzas_iso';
+const INDEXED_DB_STORE = 'sqlite_files';
+const INDEXED_DB_KEY = 'principal';
+const LEGACY_MIGRATION_KEY = 'legacy_json_v2_migrated';
 
-interface DbTable {
-  rows: Record<string, any>[];
-  autoIncrement: number;
+interface LegacyTable {
+  rows?: Record<string, unknown>[];
 }
 
-interface DbState {
-  tables: Record<string, DbTable>;
+interface LegacyDatabase {
+  tables?: Record<string, LegacyTable>;
 }
+
+const TABLE_COLUMNS: Record<string, string[]> = {
+  beneficiarios: [
+    'id', 'nombre', 'apellido', 'tipoDocumento', 'numeroDocumento', 'telefono',
+    'correo', 'banco', 'cuentaBancaria', 'estado'
+  ],
+  cheques: [
+    'id', 'numeroCheque', 'tipo', 'beneficiarioId', 'monto', 'concepto',
+    'estado', 'fecha', 'observaciones'
+  ],
+  bancos: ['id', 'nombre', 'codigo', 'estado'],
+  conceptos: ['id', 'nombre', 'estado'],
+  usuarios: [
+    'id', 'nombreUsuario', 'nombreCompleto', 'correo', 'rol', 'estado', 'passwordHash'
+  ],
+  auditoria: ['id', 'fecha', 'usuario', 'entidad', 'entidadId', 'accion', 'detalle']
+};
 
 /**
- * DatabaseService — Pure-JS localStorage backend.
+ * SQLite database powered by sql.js.
  *
- * Replaces sql.js/WebAssembly with a lightweight JSON store that persists
- * to localStorage after every write. The public API (`select`, `exec`,
- * `ready()`) is identical to the previous implementation so all other
- * services require zero changes.
+ * SQLite runs in memory and its binary file is persisted in IndexedDB after
+ * every write. Data from the previous JSON backend and from the first SQLite
+ * localStorage integration is recovered automatically.
  */
-@Injectable({
-  providedIn: 'root'
-})
+@Injectable({ providedIn: 'root' })
 export class DatabaseService {
-  private isBrowser: boolean;
-  private db: DbState = { tables: {} };
-  private _readyPromise: Promise<void>;
+  private readonly isBrowser: boolean;
+  private database: Database | null = null;
+  private storageDatabase: IDBDatabase | null = null;
+  private readonly readyPromise: Promise<void>;
 
-  constructor(@Inject(PLATFORM_ID) platformId: Object) {
+  constructor(@Inject(PLATFORM_ID) platformId: object) {
     this.isBrowser = isPlatformBrowser(platformId);
-    this._readyPromise = this.init();
+    this.readyPromise = this.initialize();
   }
 
   public ready(): Promise<void> {
-    return this._readyPromise;
+    return this.readyPromise;
   }
 
-  // ─── Initialisation ──────────────────────────────────────────────────────
-
-  private async init(): Promise<void> {
+  public async exec(sql: string, params: unknown[] = []): Promise<void> {
     if (!this.isBrowser) return;
-    // Clear stale sql.js/WASM data from the old key
-    localStorage.removeItem('finanzas_cheques_db');
-    this.load();
-    this.createTables();
-    console.log('[DB] Initialised (localStorage backend)');
+    const db = this.requireDatabase();
+    db.run(sql, this.toSqlValues(params));
+    await this.persist();
   }
 
-  private createTables(): void {
-    if (!this.db.tables['beneficiarios']) {
-      this.db.tables['beneficiarios'] = { rows: [], autoIncrement: 1 };
-    }
-    if (!this.db.tables['cheques']) {
-      this.db.tables['cheques'] = { rows: [], autoIncrement: 1 };
-    }
-    this.save();
-  }
-
-  // ─── Persistence ─────────────────────────────────────────────────────────
-
-  private save(): void {
-    if (!this.isBrowser) return;
-    try {
-      localStorage.setItem(STORAGE_KEY, JSON.stringify(this.db));
-    } catch (e) {
-      console.error('[DB] save error', e);
-    }
-  }
-
-  private load(): void {
-    try {
-      const raw = localStorage.getItem(STORAGE_KEY);
-      if (raw) {
-        this.db = JSON.parse(raw);
-        console.log('[DB] Loaded from localStorage');
-      }
-    } catch (e) {
-      console.error('[DB] load error — starting fresh', e);
-      this.db = { tables: {} };
-    }
-  }
-
-  // ─── Public Query API ────────────────────────────────────────────────────
-
-  /**
-   * Execute a write statement.
-   * Supported patterns (derived automatically from the SQL string):
-   *   INSERT INTO <table> (...cols) VALUES (?)
-   *   UPDATE <table> SET col=?, ... WHERE id=?
-   *   DELETE FROM <table> WHERE id=?
-   */
-  public exec(sql: string, params: any[] = []): void {
-    if (!this.isBrowser) return;
-    const s = sql.trim().toUpperCase();
-
-    if (s.startsWith('INSERT')) {
-      this.execInsert(sql, params);
-    } else if (s.startsWith('UPDATE')) {
-      this.execUpdate(sql, params);
-    } else if (s.startsWith('DELETE')) {
-      this.execDelete(sql, params);
-    } else if (s.startsWith('CREATE')) {
-      // no-op — tables are created in createTables()
-    } else {
-      console.warn('[DB] exec: unsupported statement', sql);
-    }
-
-    this.save();
-  }
-
-  /**
-   * Execute a SELECT query. Supports:
-   *   SELECT * FROM <table>
-   *   SELECT * FROM <table> WHERE <col> = ?
-   *   SELECT COUNT(*) as count FROM <table> [WHERE col = ?]
-   *   SELECT IFNULL(SUM(col), 0) as total FROM <table> [WHERE col = ?]
-   *   SELECT … JOIN … (handled for cheques + beneficiarios)
-   */
-  public select<T>(sql: string, params: any[] = []): T[] {
+  public select<T>(sql: string, params: unknown[] = []): T[] {
     if (!this.isBrowser) return [];
+    const db = this.requireDatabase();
+    const statement = db.prepare(sql, this.toSqlValues(params));
+    const rows: T[] = [];
 
-    const trimmed = sql.trim();
-
-    // ── Aggregate queries ────────────────────────────────────────────────
-    const countMatch = trimmed.match(
-      /SELECT\s+COUNT\(\*\)\s+as\s+count\s+FROM\s+(\w+)(?:\s+WHERE\s+(.+))?/i
-    );
-    if (countMatch) {
-      const table = countMatch[1].toLowerCase();
-      const whereClause = countMatch[2];
-      let rows = this.getRows(table);
-      if (whereClause) rows = this.applyWhere(rows, whereClause, params);
-      return [{ count: rows.length } as any];
-    }
-
-    const sumMatch = trimmed.match(
-      /SELECT\s+IFNULL\(SUM\((\w+)\),\s*0\)\s+as\s+total\s+FROM\s+(\w+)(?:\s+WHERE\s+(.+))?/i
-    );
-    if (sumMatch) {
-      const col = sumMatch[1];
-      const table = sumMatch[2].toLowerCase();
-      const whereClause = sumMatch[3];
-      let rows = this.getRows(table);
-      if (whereClause) rows = this.applyWhere(rows, whereClause, params);
-      const total = rows.reduce((acc, r) => acc + (Number(r[col]) || 0), 0);
-      return [{ total } as any];
-    }
-
-    // ── JOIN query (cheques + beneficiarios) ─────────────────────────────
-    if (/JOIN/i.test(trimmed)) {
-      return this.selectWithJoin<T>(trimmed, params);
-    }
-
-    // ── Simple SELECT ────────────────────────────────────────────────────
-    const simpleMatch = trimmed.match(
-      /SELECT\s+\*\s+FROM\s+(\w+)(?:\s+WHERE\s+(.+?))?(?:\s+ORDER\s+BY\s+(.+?))?(?:\s+LIMIT\s+(\d+))?$/i
-    );
-    if (simpleMatch) {
-      const table = simpleMatch[1].toLowerCase();
-      const whereClause = simpleMatch[2];
-      const orderClause = simpleMatch[3];
-      const limit = simpleMatch[4] ? parseInt(simpleMatch[4]) : undefined;
-
-      let rows = this.getRows(table);
-      if (whereClause) rows = this.applyWhere(rows, whereClause, params);
-      if (orderClause) rows = this.applyOrder(rows, orderClause);
-      if (limit !== undefined) rows = rows.slice(0, limit);
-      return rows as T[];
-    }
-
-    console.warn('[DB] select: unrecognised SQL', trimmed);
-    return [];
-  }
-
-  // ─── INSERT ──────────────────────────────────────────────────────────────
-
-  private execInsert(sql: string, params: any[]): void {
-    // INSERT INTO beneficiarios (col1, col2, ...) VALUES (?, ?, ...)
-    const match = sql.match(/INSERT\s+INTO\s+(\w+)\s*\(([^)]+)\)/i);
-    if (!match) { console.error('[DB] INSERT parse error', sql); return; }
-
-    const table = match[1].toLowerCase();
-    const cols = match[2].split(',').map(c => c.trim());
-    const tbl = this.db.tables[table];
-    if (!tbl) { console.error('[DB] unknown table', table); return; }
-
-    // Unique checks
-    const uniqueChecks: Record<string, string[]> = {
-      beneficiarios: ['numeroDocumento', 'cuentaBancaria'],
-      cheques: ['numeroCheque']
-    };
-    for (const uCol of (uniqueChecks[table] || [])) {
-      const idx = cols.indexOf(uCol);
-      if (idx >= 0) {
-        const val = params[idx];
-        const exists = tbl.rows.some(r => r[uCol] === val);
-        if (exists) throw new Error(`El campo '${uCol}' con valor '${val}' ya existe.`);
+    try {
+      while (statement.step()) {
+        rows.push(statement.getAsObject() as T);
       }
+    } finally {
+      statement.free();
     }
 
-    const row: Record<string, any> = { id: tbl.autoIncrement++ };
-    cols.forEach((col, i) => { row[col] = params[i] ?? null; });
-    tbl.rows.push(row);
-  }
-
-  // ─── UPDATE ──────────────────────────────────────────────────────────────
-
-  private execUpdate(sql: string, params: any[]): void {
-    // UPDATE <table> SET col=?, col=? WHERE id=?
-    const tableMatch = sql.match(/UPDATE\s+(\w+)\s+SET\s+(.+)\s+WHERE\s+(\w+)\s*=\s*\?/i);
-    if (!tableMatch) { console.error('[DB] UPDATE parse error', sql); return; }
-
-    const table = tableMatch[1].toLowerCase();
-    const setPart = tableMatch[2];
-    const whereCol = tableMatch[3];
-
-    const setCols = setPart.split(',').map(s => s.trim().split(/\s*=\s*/)[0].trim());
-    const setParams = params.slice(0, setCols.length);
-    const whereVal = params[setCols.length];
-
-    const tbl = this.db.tables[table];
-    if (!tbl) return;
-
-    // Unique checks for updates (exclude row being updated)
-    const uniqueChecks: Record<string, string[]> = {
-      beneficiarios: ['numeroDocumento', 'cuentaBancaria'],
-      cheques: ['numeroCheque']
-    };
-    for (const uCol of (uniqueChecks[table] || [])) {
-      const idx = setCols.indexOf(uCol);
-      if (idx >= 0) {
-        const val = setParams[idx];
-        const exists = tbl.rows.some(r => r[uCol] === val && r[whereCol] !== whereVal);
-        if (exists) throw new Error(`El campo '${uCol}' con valor '${val}' ya existe.`);
-      }
-    }
-
-    tbl.rows = tbl.rows.map(row => {
-      if (row[whereCol] !== whereVal) return row;
-      const updated = { ...row };
-      setCols.forEach((col, i) => { updated[col] = setParams[i]; });
-      return updated;
-    });
-  }
-
-  // ─── DELETE ──────────────────────────────────────────────────────────────
-
-  private execDelete(sql: string, params: any[]): void {
-    const match = sql.match(/DELETE\s+FROM\s+(\w+)\s+WHERE\s+(\w+)\s*=\s*\?/i);
-    if (!match) { console.error('[DB] DELETE parse error', sql); return; }
-    const table = match[1].toLowerCase();
-    const col = match[2];
-    const val = params[0];
-    const tbl = this.db.tables[table];
-    if (!tbl) return;
-    tbl.rows = tbl.rows.filter(r => r[col] !== val);
-  }
-
-  // ─── JOIN ────────────────────────────────────────────────────────────────
-
-  private selectWithJoin<T>(sql: string, params: any[]): T[] {
-    const cheques: any[] = this.getRows('cheques');
-    const beneficiarios: any[] = this.getRows('beneficiarios');
-
-    let rows: any[] = cheques.map((c: any) => {
-      const b: any = beneficiarios.find((bRow: any) => bRow['id'] === c['beneficiarioId']) || {};
-      return {
-        ...c,
-        beneficiarioNombre: `${b['nombre'] || ''} ${b['apellido'] || ''}`.trim()
-      };
-    });
-
-    // ORDER BY
-    const orderMatch = sql.match(/ORDER BY\s+(.+?)(?:\s+LIMIT\s+\d+)?$/i);
-    if (orderMatch) rows = this.applyOrder(rows, orderMatch[1]);
-
-    // LIMIT
-    const limitMatch = sql.match(/LIMIT\s+(\d+)/i);
-    if (limitMatch) rows = rows.slice(0, parseInt(limitMatch[1]));
-
-    return rows as T[];
-  }
-
-  // ─── Helpers ─────────────────────────────────────────────────────────────
-
-  private getRows(table: string): Record<string, any>[] {
-    return [...(this.db.tables[table.toLowerCase()]?.rows || [])];
-  }
-
-  private applyWhere(
-    rows: Record<string, any>[],
-    clause: string,
-    params: any[]
-  ): Record<string, any>[] {
-    // Only handles simple: col = ?  and  col = ? AND id != ?
-    const parts = clause.trim().split(/\s+AND\s+/i);
-    let paramIdx = 0;
-    for (const part of parts) {
-      const neqMatch = part.match(/(\w+)\s*!=\s*\?/i);
-      const eqMatch = part.match(/(\w+)\s*=\s*\?/i);
-      if (neqMatch) {
-        const col = neqMatch[1];
-        const val = params[paramIdx++];
-        rows = rows.filter(r => r[col] != val);
-      } else if (eqMatch) {
-        const col = eqMatch[1];
-        const val = params[paramIdx++];
-        rows = rows.filter(r => r[col] == val);
-      }
-    }
     return rows;
   }
 
-  private applyOrder(rows: Record<string, any>[], clause: string): Record<string, any>[] {
-    // ORDER BY col [ASC|DESC], col2 [ASC|DESC]
-    // We support a single term for simplicity
-    const term = clause.trim().split(',')[0].trim();
-    const parts = term.split(/\s+/);
-    const col = parts[0].replace(/^[a-z]\./i, ''); // strip table alias (c., b.)
-    const dir = (parts[1] || 'ASC').toUpperCase();
-    return [...rows].sort((a, b) => {
-      const av = a[col] ?? '';
-      const bv = b[col] ?? '';
-      if (av < bv) return dir === 'ASC' ? -1 : 1;
-      if (av > bv) return dir === 'ASC' ? 1 : -1;
-      return 0;
+  private async initialize(): Promise<void> {
+    if (!this.isBrowser) return;
+
+    const wasmBinary = await this.loadWasmBinary();
+    // Supplying the bytes directly avoids compileStreaming and therefore does
+    // not depend on the web server's Content-Type configuration.
+    const SQL = await initSqlJs({ wasmBinary });
+    this.storageDatabase = await this.openStorageDatabase();
+
+    const indexedDatabase = await this.loadFromIndexedDb();
+    const localDatabase = localStorage.getItem(SQLITE_STORAGE_KEY);
+    let databaseBytes = indexedDatabase;
+
+    if (!databaseBytes && localDatabase) {
+      try {
+        databaseBytes = this.decodeBase64(localDatabase);
+      } catch (error) {
+        console.error('[DB] No se pudo leer la base SQLite anterior.', error);
+      }
+    }
+
+    try {
+      this.database = databaseBytes ? new SQL.Database(databaseBytes) : new SQL.Database();
+    } catch (error) {
+      console.error('[DB] No se pudo abrir la base SQLite guardada; se creará una nueva.', error);
+      this.database = new SQL.Database();
+    }
+
+    this.createSchema();
+
+    const migrationCompleted = this.select<{ value: string }>(
+      'SELECT value FROM app_meta WHERE key = ?', [LEGACY_MIGRATION_KEY]
+    )[0]?.value === '1';
+
+    // A valid but empty SQLite file must not hide the previous JSON records.
+    if (!migrationCompleted && localStorage.getItem(LEGACY_STORAGE_KEY)) {
+      this.migrateLegacyDatabase();
+    }
+
+    await this.persist();
+
+    // IndexedDB is now authoritative. Keep the JSON recovery backup, but free
+    // the obsolete base64 SQLite copy that consumed the localStorage quota.
+    if (this.storageDatabase && localDatabase) {
+      localStorage.removeItem(SQLITE_STORAGE_KEY);
+    }
+    console.info('[DB] SQLite inicializada correctamente.');
+  }
+
+  private createSchema(): void {
+    this.requireDatabase().run(`
+      PRAGMA foreign_keys = ON;
+
+      CREATE TABLE IF NOT EXISTS beneficiarios (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        nombre TEXT NOT NULL,
+        apellido TEXT NOT NULL,
+        tipoDocumento TEXT NOT NULL,
+        numeroDocumento TEXT NOT NULL UNIQUE,
+        telefono TEXT NOT NULL DEFAULT '',
+        correo TEXT NOT NULL DEFAULT '',
+        banco TEXT NOT NULL DEFAULT '',
+        cuentaBancaria TEXT NOT NULL UNIQUE,
+        estado TEXT NOT NULL CHECK (estado IN ('Activo', 'Inactivo'))
+      );
+
+      CREATE TABLE IF NOT EXISTS cheques (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        numeroCheque TEXT NOT NULL UNIQUE,
+        tipo TEXT NOT NULL CHECK (tipo IN ('Emitido', 'Recibido')),
+        beneficiarioId INTEGER NOT NULL,
+        monto REAL NOT NULL CHECK (monto > 0),
+        concepto TEXT NOT NULL,
+        estado TEXT NOT NULL CHECK (estado IN ('Pendiente', 'Cobrado', 'Anulado')),
+        fecha TEXT NOT NULL,
+        observaciones TEXT NOT NULL DEFAULT '',
+        FOREIGN KEY (beneficiarioId) REFERENCES beneficiarios(id) ON DELETE RESTRICT
+      );
+
+      CREATE TABLE IF NOT EXISTS bancos (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        nombre TEXT NOT NULL UNIQUE COLLATE NOCASE,
+        codigo TEXT NOT NULL DEFAULT '',
+        estado TEXT NOT NULL CHECK (estado IN ('Activo', 'Inactivo'))
+      );
+
+      CREATE TABLE IF NOT EXISTS conceptos (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        nombre TEXT NOT NULL UNIQUE COLLATE NOCASE,
+        estado TEXT NOT NULL CHECK (estado IN ('Activo', 'Inactivo'))
+      );
+
+      CREATE TABLE IF NOT EXISTS usuarios (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        nombreUsuario TEXT NOT NULL UNIQUE COLLATE NOCASE,
+        nombreCompleto TEXT NOT NULL,
+        correo TEXT NOT NULL UNIQUE COLLATE NOCASE,
+        rol TEXT NOT NULL CHECK (rol IN ('Administrador', 'Operador', 'Consulta')),
+        estado TEXT NOT NULL CHECK (estado IN ('Activo', 'Inactivo')),
+        passwordHash TEXT NOT NULL
+      );
+
+      CREATE TABLE IF NOT EXISTS auditoria (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        fecha TEXT NOT NULL,
+        usuario TEXT NOT NULL,
+        entidad TEXT NOT NULL CHECK (entidad IN ('Cheque', 'Beneficiario', 'Banco', 'Concepto', 'Usuario')),
+        entidadId INTEGER NOT NULL,
+        accion TEXT NOT NULL CHECK (accion IN ('Crear', 'Editar', 'Eliminar', 'Anular')),
+        detalle TEXT NOT NULL DEFAULT ''
+      );
+
+      CREATE TABLE IF NOT EXISTS app_meta (
+        key TEXT PRIMARY KEY,
+        value TEXT NOT NULL
+      );
+
+      CREATE TABLE IF NOT EXISTS contabilidad_config (
+        id INTEGER PRIMARY KEY CHECK (id = 1),
+        activo INTEGER NOT NULL DEFAULT 0 CHECK (activo IN (0, 1)),
+        endpoint TEXT NOT NULL,
+        auxiliarId INTEGER NOT NULL DEFAULT 5 CHECK (auxiliarId > 0),
+        emitidoCuentaDebitoId INTEGER NOT NULL DEFAULT 0,
+        emitidoCuentaCreditoId INTEGER NOT NULL DEFAULT 0,
+        recibidoCuentaDebitoId INTEGER NOT NULL DEFAULT 0,
+        recibidoCuentaCreditoId INTEGER NOT NULL DEFAULT 0,
+        actualizadoEn TEXT NOT NULL
+      );
+
+      CREATE TABLE IF NOT EXISTS contabilidad_envios (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        chequeId INTEGER NOT NULL UNIQUE,
+        tipo TEXT NOT NULL CHECK (tipo IN ('Emitido', 'Recibido')),
+        auxiliarId INTEGER NOT NULL,
+        cuentaDebitoId INTEGER NOT NULL,
+        cuentaCreditoId INTEGER NOT NULL,
+        descripcion TEXT NOT NULL,
+        monto REAL NOT NULL CHECK (monto > 0),
+        estado TEXT NOT NULL DEFAULT 'Pendiente' CHECK (estado IN ('Pendiente', 'Enviado', 'Error')),
+        intentos INTEGER NOT NULL DEFAULT 0,
+        ultimoIntento TEXT,
+        enviadoEn TEXT,
+        respuesta TEXT NOT NULL DEFAULT '',
+        error TEXT NOT NULL DEFAULT ''
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_cheques_beneficiario ON cheques(beneficiarioId);
+      CREATE INDEX IF NOT EXISTS idx_cheques_fecha ON cheques(fecha DESC);
+      CREATE INDEX IF NOT EXISTS idx_cheques_estado ON cheques(estado);
+      CREATE INDEX IF NOT EXISTS idx_auditoria_entidad ON auditoria(entidad, entidadId);
+      CREATE INDEX IF NOT EXISTS idx_contabilidad_envios_estado ON contabilidad_envios(estado);
+    `);
+  }
+
+  private migrateLegacyDatabase(): void {
+    const legacyJson = localStorage.getItem(LEGACY_STORAGE_KEY);
+    if (!legacyJson) return;
+
+    let legacy: LegacyDatabase;
+    try {
+      legacy = JSON.parse(legacyJson) as LegacyDatabase;
+    } catch (error) {
+      console.error('[DB] Los datos anteriores no tienen un formato válido.', error);
+      return;
+    }
+
+    const db = this.requireDatabase();
+    const migrationOrder = [
+      'beneficiarios', 'bancos', 'conceptos', 'usuarios', 'cheques', 'auditoria'
+    ];
+    let insertedRows = 0;
+    let existingRows = 0;
+
+    // The JSON engine allowed orphaned historical rows. Disabling foreign keys
+    // only during import preserves those records instead of blocking the app.
+    db.run('PRAGMA foreign_keys = OFF');
+    db.run('BEGIN TRANSACTION');
+    try {
+      for (const table of migrationOrder) {
+        const rows = legacy.tables?.[table]?.rows ?? [];
+        const allowedColumns = TABLE_COLUMNS[table];
+
+        for (const row of rows) {
+          const columns = allowedColumns.filter((column) => row[column] !== undefined);
+          if (columns.length === 0) continue;
+
+          const placeholders = columns.map(() => '?').join(', ');
+          const quotedColumns = columns.map((column) => `"${column}"`).join(', ');
+          const values = columns.map((column) => row[column]);
+          db.run(
+            `INSERT OR IGNORE INTO "${table}" (${quotedColumns}) VALUES (${placeholders})`,
+            this.toSqlValues(values)
+          );
+          if (db.getRowsModified() > 0) insertedRows++;
+          else existingRows++;
+        }
+      }
+
+      db.run(
+        'INSERT OR REPLACE INTO app_meta (key, value) VALUES (?, ?)',
+        [LEGACY_MIGRATION_KEY, '1']
+      );
+      db.run('COMMIT');
+    } catch (error) {
+      db.run('ROLLBACK');
+      console.error('[DB] No se pudo migrar la base anterior; los datos originales se conservaron.', error);
+      throw error;
+    } finally {
+      db.run('PRAGMA foreign_keys = ON');
+    }
+
+    console.info(
+      `[DB] Migración finalizada: ${insertedRows} registros recuperados, ` +
+      `${existingRows} ya existentes o duplicados.`
+    );
+  }
+
+  private async persist(): Promise<void> {
+    if (!this.isBrowser || !this.database) return;
+    const bytes = this.database.export();
+    // sql.js reopens the database during export and resets connection PRAGMAs.
+    this.database.run('PRAGMA foreign_keys = ON');
+
+    if (this.storageDatabase) {
+      await new Promise<void>((resolve, reject) => {
+        const transaction = this.storageDatabase!.transaction(INDEXED_DB_STORE, 'readwrite');
+        transaction.objectStore(INDEXED_DB_STORE).put(bytes, INDEXED_DB_KEY);
+        transaction.oncomplete = () => resolve();
+        transaction.onerror = () => reject(transaction.error);
+        transaction.onabort = () => reject(transaction.error);
+      });
+      return;
+    }
+
+    // Fallback for browsers where IndexedDB is unavailable.
+    localStorage.setItem(SQLITE_STORAGE_KEY, this.encodeBase64(bytes));
+  }
+
+  private async openStorageDatabase(): Promise<IDBDatabase | null> {
+    if (typeof indexedDB === 'undefined') return null;
+
+    try {
+      return await new Promise<IDBDatabase>((resolve, reject) => {
+        const request = indexedDB.open(INDEXED_DB_NAME, 1);
+        request.onupgradeneeded = () => {
+          const db = request.result;
+          if (!db.objectStoreNames.contains(INDEXED_DB_STORE)) {
+            db.createObjectStore(INDEXED_DB_STORE);
+          }
+        };
+        request.onsuccess = () => resolve(request.result);
+        request.onerror = () => reject(request.error);
+        request.onblocked = () => reject(new Error('La base de almacenamiento está bloqueada.'));
+      });
+    } catch (error) {
+      console.warn('[DB] IndexedDB no está disponible; se usará localStorage.', error);
+      return null;
+    }
+  }
+
+  private async loadWasmBinary(): Promise<ArrayBuffer> {
+    const mainScript = Array.from(document.scripts)
+      .map((script) => script.src)
+      .find((src) => /\/main(?:-[\w]+)?\.js(?:\?|$)/i.test(src));
+    const candidates = [
+      mainScript ? new URL('sql-wasm.wasm', mainScript).href : '',
+      new URL('sql-wasm.wasm', document.baseURI).href,
+      new URL('/sql-wasm.wasm', window.location.origin).href
+    ].filter((url, index, urls) => Boolean(url) && urls.indexOf(url) === index);
+
+    for (const url of candidates) {
+      try {
+        const response = await fetch(url, { cache: 'no-store' });
+        if (!response.ok) continue;
+
+        const buffer = await response.arrayBuffer();
+        const bytes = new Uint8Array(buffer);
+        const hasWasmSignature =
+          bytes.length >= 4 &&
+          bytes[0] === 0x00 && bytes[1] === 0x61 &&
+          bytes[2] === 0x73 && bytes[3] === 0x6d;
+        if (hasWasmSignature) return buffer;
+      } catch {
+        // Try the next location. Deployments may expose assets from either
+        // the bundle directory, the Angular base URL, or the origin root.
+      }
+    }
+
+    throw new Error(
+      `No se pudo cargar sql-wasm.wasm. Ubicaciones comprobadas: ${candidates.join(', ')}`
+    );
+  }
+
+  private async loadFromIndexedDb(): Promise<Uint8Array | null> {
+    if (!this.storageDatabase) return null;
+
+    return new Promise<Uint8Array | null>((resolve, reject) => {
+      const transaction = this.storageDatabase!.transaction(INDEXED_DB_STORE, 'readonly');
+      const request = transaction.objectStore(INDEXED_DB_STORE).get(INDEXED_DB_KEY);
+      request.onsuccess = () => {
+        const value = request.result as Uint8Array | ArrayBuffer | undefined;
+        if (!value) resolve(null);
+        else if (value instanceof Uint8Array) resolve(value);
+        else resolve(new Uint8Array(value));
+      };
+      request.onerror = () => reject(request.error);
     });
+  }
+
+  private requireDatabase(): Database {
+    if (!this.database) {
+      throw new Error('La base de datos SQLite todavía no está inicializada.');
+    }
+    return this.database;
+  }
+
+  private toSqlValues(params: unknown[]): SqlValue[] {
+    return params.map((value) => {
+      if (value === undefined || value === null) return null;
+      if (typeof value === 'string' || typeof value === 'number') return value;
+      if (typeof value === 'boolean') return value ? 1 : 0;
+      if (value instanceof Uint8Array) return value;
+      return String(value);
+    });
+  }
+
+  private encodeBase64(bytes: Uint8Array): string {
+    const chunkSize = 0x8000;
+    let binary = '';
+    for (let offset = 0; offset < bytes.length; offset += chunkSize) {
+      binary += String.fromCharCode(...bytes.subarray(offset, offset + chunkSize));
+    }
+    return btoa(binary);
+  }
+
+  private decodeBase64(value: string): Uint8Array {
+    const binary = atob(value);
+    const bytes = new Uint8Array(binary.length);
+    for (let index = 0; index < binary.length; index++) {
+      bytes[index] = binary.charCodeAt(index);
+    }
+    return bytes;
   }
 }

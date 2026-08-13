@@ -2,6 +2,29 @@
 
 This project was generated using [Angular CLI](https://github.com/angular/angular-cli) version 20.3.6.
 
+## Base de datos
+
+La aplicación usa SQLite en el navegador mediante `sql.js`. El archivo SQLite se mantiene en
+memoria durante la sesión y se guarda de forma binaria en IndexedDB después de cada escritura.
+El archivo `public/sql-wasm.wasm` se resuelve respecto a la URL base de la aplicación, por lo que
+también funciona cuando se despliega dentro de una subcarpeta.
+
+Al iniciar por primera vez, los datos del backend JSON anterior (`finanzas_cheques_db_v2`) se
+migran automáticamente y de forma transaccional a SQLite. La copia JSON anterior se conserva como
+respaldo de recuperación y no vuelve a importarse una vez registrada la migración.
+
+## Integración contable
+
+La ruta `/integraciones/contabilidad` permite activar la conexión con el WS de Contabilidad,
+configurar el auxiliar y mapear las cuentas débito/crédito para cheques emitidos y recibidos.
+Cuando un cheque queda `Cobrado`, se agrega a una cola SQLite y se intenta enviar sin bloquear el
+CRUD. Los errores pueden reintentarse desde la pantalla y `chequeId` es único para evitar asientos
+duplicados.
+
+Las solicitudes al endpoint documentado pasan por `/api/contabilidad` para evitar bloqueos CORS.
+En desarrollo esta ruta se configura mediante `proxy.conf.json`; en producción la atiende el
+servidor Express de SSR.
+
 ## Development server
 
 To start a local development server, run:

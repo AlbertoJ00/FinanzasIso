@@ -123,6 +123,8 @@ h1, h2, h3, h4, h5, h6 {
 .nav-links {
   display: flex;
   gap: 1rem;
+  flex-wrap: wrap;
+  justify-content: flex-end;
 }
 
 .nav-item {
@@ -753,4 +755,3 @@ h1, h2, h3, h4, h5, h6 {
     grid-template-columns: 1fr;
   }
 }
-

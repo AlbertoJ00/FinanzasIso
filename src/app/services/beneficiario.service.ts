@@ -1,12 +1,13 @@
 import { Injectable } from '@angular/core';
 import { DatabaseService } from './database.service';
 import { Beneficiario } from '../models';
+import { AuditoriaService } from './auditoria.service';
 
 @Injectable({
   providedIn: 'root'
 })
 export class BeneficiarioService {
-  constructor(private dbService: DatabaseService) {}
+  constructor(private dbService: DatabaseService, private audit: AuditoriaService) {}
 
   public async getAll(): Promise<Beneficiario[]> {
     await this.dbService.ready();
@@ -48,7 +49,7 @@ export class BeneficiarioService {
     const cuentaUnique = await this.isCuentaBancariaUnique(beneficiario.cuentaBancaria);
     if (!cuentaUnique) throw new Error(`La cuenta bancaria '${beneficiario.cuentaBancaria}' ya está registrada.`);
 
-    this.dbService.exec(
+    await this.dbService.exec(
       `INSERT INTO beneficiarios (nombre, apellido, tipoDocumento, numeroDocumento, telefono, correo, banco, cuentaBancaria, estado)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
@@ -58,6 +59,8 @@ export class BeneficiarioService {
         beneficiario.cuentaBancaria, beneficiario.estado
       ]
     );
+    const creado = (await this.getAll()).find(b => b.numeroDocumento === beneficiario.numeroDocumento);
+    if (creado?.id) await this.audit.registrar('Beneficiario', creado.id, 'Crear', `${creado.nombre} ${creado.apellido}`);
   }
 
   public async update(beneficiario: Beneficiario): Promise<void> {
@@ -69,7 +72,7 @@ export class BeneficiarioService {
     const cuentaUnique = await this.isCuentaBancariaUnique(beneficiario.cuentaBancaria, beneficiario.id);
     if (!cuentaUnique) throw new Error(`La cuenta bancaria '${beneficiario.cuentaBancaria}' ya está registrada.`);
 
-    this.dbService.exec(
+    await this.dbService.exec(
       `UPDATE beneficiarios SET nombre = ?, apellido = ?, tipoDocumento = ?, numeroDocumento = ?, telefono = ?, correo = ?, banco = ?, cuentaBancaria = ?, estado = ? WHERE id = ?`,
       [
         beneficiario.nombre, beneficiario.apellido, beneficiario.tipoDocumento,
@@ -79,6 +82,7 @@ export class BeneficiarioService {
         beneficiario.id
       ]
     );
+    await this.audit.registrar('Beneficiario', beneficiario.id, 'Editar', `${beneficiario.nombre} ${beneficiario.apellido}`);
   }
 
   public async delete(id: number): Promise<void> {
@@ -89,6 +93,7 @@ export class BeneficiarioService {
     if ((checkCheques[0]?.count ?? 0) > 0) {
       throw new Error('No se puede eliminar el beneficiario porque tiene cheques asociados.');
     }
-    this.dbService.exec('DELETE FROM beneficiarios WHERE id = ?', [id]);
+    await this.dbService.exec('DELETE FROM beneficiarios WHERE id = ?', [id]);
+    await this.audit.registrar('Beneficiario', id, 'Eliminar');
   }
 }

@@ -1,19 +1,28 @@
 import { Injectable } from '@angular/core';
 import { DatabaseService } from './database.service';
 import { Cheque } from '../models';
+import { AuditoriaService } from './auditoria.service';
+import { ContabilidadService } from './contabilidad.service';
 
 @Injectable({
   providedIn: 'root'
 })
 export class ChequeService {
-  constructor(private dbService: DatabaseService) {}
+  constructor(
+    private dbService: DatabaseService,
+    private audit: AuditoriaService,
+    private contabilidad: ContabilidadService
+  ) {}
 
   public async getAll(): Promise<Cheque[]> {
     await this.dbService.ready();
     return this.dbService.select<Cheque>(`
-      SELECT c.*, (b.nombre || ' ' || b.apellido) as beneficiarioNombre
+      SELECT c.*,
+        COALESCE((b.nombre || ' ' || b.apellido), 'Sin beneficiario') as beneficiarioNombre,
+        ce.estado as contabilidadEstado
       FROM cheques c
-      JOIN beneficiarios b ON c.beneficiarioId = b.id
+      LEFT JOIN beneficiarios b ON c.beneficiarioId = b.id
+      LEFT JOIN contabilidad_envios ce ON ce.chequeId = c.id
       ORDER BY c.fecha DESC, c.id DESC
     `);
   }
@@ -39,7 +48,7 @@ export class ChequeService {
     const numUnique = await this.isNumeroChequeUnique(cheque.numeroCheque);
     if (!numUnique) throw new Error(`El número de cheque '${cheque.numeroCheque}' ya existe.`);
 
-    this.dbService.exec(
+    await this.dbService.exec(
       `INSERT INTO cheques (numeroCheque, tipo, beneficiarioId, monto, concepto, estado, fecha, observaciones)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
       [
@@ -48,6 +57,12 @@ export class ChequeService {
         cheque.fecha, cheque.observaciones || ''
       ]
     );
+    const creado = (await this.getAll()).find(c => c.numeroCheque === cheque.numeroCheque);
+    if (creado?.id) {
+      await this.audit.registrar('Cheque', creado.id, 'Crear', creado.numeroCheque);
+      const encolado = await this.contabilidad.encolarCheque(creado);
+      if (encolado) this.contabilidad.procesarEnSegundoPlano(creado.id);
+    }
   }
 
   public async update(cheque: Cheque): Promise<void> {
@@ -57,7 +72,7 @@ export class ChequeService {
     const numUnique = await this.isNumeroChequeUnique(cheque.numeroCheque, cheque.id);
     if (!numUnique) throw new Error(`El número de cheque '${cheque.numeroCheque}' ya existe.`);
 
-    this.dbService.exec(
+    await this.dbService.exec(
       `UPDATE cheques SET numeroCheque = ?, tipo = ?, beneficiarioId = ?, monto = ?, concepto = ?, estado = ?, fecha = ?, observaciones = ? WHERE id = ?`,
       [
         cheque.numeroCheque, cheque.tipo, cheque.beneficiarioId,
@@ -66,10 +81,14 @@ export class ChequeService {
         cheque.id
       ]
     );
+    await this.audit.registrar('Cheque', cheque.id, cheque.estado === 'Anulado' ? 'Anular' : 'Editar', cheque.numeroCheque);
+    const encolado = await this.contabilidad.encolarCheque(cheque);
+    if (encolado) this.contabilidad.procesarEnSegundoPlano(cheque.id);
   }
 
   public async delete(id: number): Promise<void> {
     await this.dbService.ready();
-    this.dbService.exec('DELETE FROM cheques WHERE id = ?', [id]);
+    await this.dbService.exec('DELETE FROM cheques WHERE id = ?', [id]);
+    await this.audit.registrar('Cheque', id, 'Eliminar');
   }
 }

@@ -66,6 +66,7 @@ import { ConfirmDialogComponent, ConfirmDialogData } from '../../components/conf
                 </th>
                 <th>Concepto</th>
                 <th>Estado</th>
+                <th>Contabilidad</th>
                 <th style="cursor: pointer; user-select: none;" (click)="toggleSort('monto')">
                   Monto
                   <i class="material-icons" style="font-size: 1rem; vertical-align: middle; margin-left: 0.25rem;">
@@ -99,9 +100,19 @@ import { ConfirmDialogComponent, ConfirmDialogData } from '../../components/conf
                     {{ c.estado }}
                   </span>
                 </td>
+                <td>
+                  <span *ngIf="c.contabilidadEstado; else noContabilidad" class="badge"
+                    [class.estado-cobrado]="c.contabilidadEstado === 'Enviado'"
+                    [class.estado-pendiente]="c.contabilidadEstado === 'Pendiente'"
+                    [class.estado-anulado]="c.contabilidadEstado === 'Error'">
+                    {{ c.contabilidadEstado }}
+                  </span>
+                  <ng-template #noContabilidad><span style="color:var(--color-text-secondary)">—</span></ng-template>
+                </td>
                 <td style="font-weight: 600; color: #ffffff;">RD$ {{ c.monto | number:'1.2-2' }}</td>
                 <td style="color: var(--color-text-secondary); font-size: 0.8rem;">{{ c.fecha }}</td>
                 <td style="text-align: right;">
+                  <button class="icon-btn" title="Ver detalle" [routerLink]="['/cheques', c.id]"><i class="material-icons">visibility</i></button>
                   <button class="icon-btn edit" title="Editar" (click)="onEditCheque(c)">
                     <i class="material-icons">edit</i>
                   </button>

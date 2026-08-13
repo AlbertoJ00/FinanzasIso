@@ -1,0 +1,10 @@
+{
+  "/api/contabilidad": {
+    "target": "https://sistema-contabilidad.onrender.com",
+    "secure": true,
+    "changeOrigin": true,
+    "pathRewrite": {
+      "^/api/contabilidad": ""
+    }
+  }
+}

@@ -5,6 +5,8 @@ import { Beneficiario } from '../models';
 import { BeneficiarioService } from '../services/beneficiario.service';
 import { NotificationService } from '../services/notification.service';
 import { LoadingService } from '../services/loading.service';
+import { BancoService } from '../services/banco.service';
+import { Banco } from '../models';
 
 @Component({
   selector: 'app-beneficiario-modal',
@@ -65,7 +67,11 @@ import { LoadingService } from '../services/loading.service';
 
           <div class="form-field">
             <label class="form-label">Banco</label>
-            <input type="text" class="form-input" formControlName="banco" placeholder="BHD" [class.invalid]="isFieldInvalid('banco')">
+            <select class="form-select-native" formControlName="banco" [class.invalid]="isFieldInvalid('banco')">
+              <option value="" disabled>Seleccione un banco</option>
+              <option *ngIf="bancoExistente" [value]="bancoExistente">{{ bancoExistente }} (existente)</option>
+              <option *ngFor="let banco of bancos" [value]="banco.nombre">{{ banco.nombre }}</option>
+            </select>
             <div class="form-error" *ngIf="isFieldInvalid('banco')">El banco es requerido.</div>
           </div>
 
@@ -101,20 +107,25 @@ import { LoadingService } from '../services/loading.service';
 export class BeneficiarioModal implements OnInit {
   public form!: FormGroup;
   public isEdit = false;
+  public bancos: Banco[] = [];
 
   constructor(
     private fb: FormBuilder,
     private beneficiarioService: BeneficiarioService,
     private notificationService: NotificationService,
     private loadingService: LoadingService,
-    public dialogRef: MatDialogRef<BeneficiarioModal>,
+    public dialogRef: MatDialogRef<BeneficiarioModal>, private bancoService: BancoService,
     @Inject(MAT_DIALOG_DATA) public data: Beneficiario | null
   ) {}
 
-  public ngOnInit(): void {
+  public async ngOnInit(): Promise<void> {
     this.isEdit = !!this.data;
     this.initForm();
+    this.bancos = (await this.bancoService.getAll()).filter(b => b.estado === 'Activo');
   }
+
+  public bancoDisponible(nombre: string): boolean { return this.bancos.some(b => b.nombre === nombre); }
+  public get bancoExistente(): string { const nombre = this.data?.banco || ''; return nombre && !this.bancoDisponible(nombre) ? nombre : ''; }
 
   private initForm(): void {
     this.form = this.fb.group({

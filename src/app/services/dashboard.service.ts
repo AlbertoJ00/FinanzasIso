@@ -56,9 +56,9 @@ export class DashboardService {
       )[0]?.total ?? 0;
 
     const recentCheques = this.dbService.select<Cheque>(`
-      SELECT c.*, (b.nombre || ' ' || b.apellido) as beneficiarioNombre
+      SELECT c.*, COALESCE((b.nombre || ' ' || b.apellido), 'Sin beneficiario') as beneficiarioNombre
       FROM cheques c
-      JOIN beneficiarios b ON c.beneficiarioId = b.id
+      LEFT JOIN beneficiarios b ON c.beneficiarioId = b.id
       ORDER BY c.id DESC
       LIMIT 5
     `);

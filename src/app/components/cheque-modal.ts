@@ -6,6 +6,8 @@ import { ChequeService } from '../services/cheque.service';
 import { BeneficiarioService } from '../services/beneficiario.service';
 import { NotificationService } from '../services/notification.service';
 import { LoadingService } from '../services/loading.service';
+import { ConceptoService } from '../services/concepto.service';
+import { Concepto } from '../models';
 
 @Component({
   selector: 'app-cheque-modal',
@@ -83,7 +85,13 @@ import { LoadingService } from '../services/loading.service';
 
           <div class="form-field form-full-width">
             <label class="form-label">Concepto (Descripción)</label>
-            <input type="text" class="form-input" formControlName="concepto" placeholder="Compra de supermercado" [class.invalid]="isFieldInvalid('concepto')">
+            <select class="form-select-native" formControlName="concepto" [class.invalid]="isFieldInvalid('concepto')">
+              <option value="" disabled>Seleccione un concepto</option>
+              <option *ngIf="conceptoExistente" [value]="conceptoExistente">{{ conceptoExistente }} (existente)</option>
+              <option *ngFor="let concepto of conceptos" [value]="concepto.nombre">{{ concepto.nombre }}</option>
+              <option value="Otro">Otro (texto libre)</option>
+            </select>
+            <input *ngIf="form.get('concepto')?.value === 'Otro'" type="text" class="form-input" style="margin-top:.5rem" [(ngModel)]="otroConcepto" [ngModelOptions]="{standalone:true}" placeholder="Especifique el concepto">
             <div class="form-error" *ngIf="isFieldInvalid('concepto')">El concepto es requerido.</div>
           </div>
 
@@ -111,6 +119,8 @@ export class ChequeModal implements OnInit {
   public form!: FormGroup;
   public isEdit = false;
   public beneficiarios: Beneficiario[] = [];
+  public conceptos: Concepto[] = [];
+  public otroConcepto = '';
 
   constructor(
     private fb: FormBuilder,
@@ -118,7 +128,7 @@ export class ChequeModal implements OnInit {
     private beneficiarioService: BeneficiarioService,
     private notificationService: NotificationService,
     private loadingService: LoadingService,
-    public dialogRef: MatDialogRef<ChequeModal>,
+    public dialogRef: MatDialogRef<ChequeModal>, private conceptoService: ConceptoService,
     @Inject(MAT_DIALOG_DATA) public data: Cheque | null
   ) {}
 
@@ -126,6 +136,7 @@ export class ChequeModal implements OnInit {
     this.isEdit = !!this.data;
     this.initForm();
     await this.loadBeneficiarios();
+    this.conceptos = (await this.conceptoService.getAll()).filter(c => c.estado === 'Activo');
   }
 
   private initForm(): void {
@@ -177,6 +188,8 @@ export class ChequeModal implements OnInit {
       
       const chequeData: Cheque = {
         ...formVal,
+        concepto: formVal.concepto === 'Otro' ? this.otroConcepto.trim() : formVal.concepto,
+        beneficiarioId: Number(formVal.beneficiarioId),
         fecha: formattedDate
       };
 
@@ -194,6 +207,9 @@ export class ChequeModal implements OnInit {
       this.loadingService.hide();
     }
   }
+
+  public conceptoDisponible(nombre: string): boolean { return this.conceptos.some(c => c.nombre === nombre); }
+  public get conceptoExistente(): string { const nombre = this.data?.concepto || ''; return nombre && !this.conceptoDisponible(nombre) ? nombre : ''; }
 
   private getFormattedDate(): string {
     const date = new Date();

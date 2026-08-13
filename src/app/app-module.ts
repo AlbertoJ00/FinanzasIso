@@ -4,6 +4,7 @@ import { BrowserAnimationsModule } from '@angular/platform-browser/animations';
 import { FormsModule, ReactiveFormsModule } from '@angular/forms';
 import { MatDialogModule } from '@angular/material/dialog';
 import { MatSnackBarModule } from '@angular/material/snack-bar';
+import { provideHttpClient } from '@angular/common/http';
 
 import { AppRoutingModule } from './app-routing-module';
 import { App } from './app';
@@ -17,6 +18,10 @@ import { BeneficiariosComponent } from './pages/beneficiarios/beneficiarios';
 import { ConfirmDialogComponent } from './components/confirm-dialog';
 import { ChequeModal } from './components/cheque-modal';
 import { BeneficiarioModal } from './components/beneficiario-modal';
+import { CatalogoModal } from './components/catalogo-modal';
+import { BancosComponent, ConceptosComponent } from './pages/catalogos/catalogos';
+import { LoginComponent, DetalleChequeComponent, DetalleBeneficiarioComponent, HistorialComponent, AuditoriaComponent, ReportesComponent, NotFoundComponent, UsuariosComponent } from './pages/extras/extras';
+import { ContabilidadComponent } from './pages/integraciones/contabilidad';
 
 @NgModule({
   declarations: [
@@ -26,7 +31,9 @@ import { BeneficiarioModal } from './components/beneficiario-modal';
     BeneficiariosComponent,
     ConfirmDialogComponent,
     ChequeModal,
-    BeneficiarioModal
+    BeneficiarioModal, CatalogoModal, BancosComponent, ConceptosComponent, LoginComponent,
+    DetalleChequeComponent, DetalleBeneficiarioComponent, HistorialComponent, AuditoriaComponent, ReportesComponent, NotFoundComponent, UsuariosComponent,
+    ContabilidadComponent
   ],
   imports: [
     BrowserModule,
@@ -39,7 +46,8 @@ import { BeneficiarioModal } from './components/beneficiario-modal';
   ],
   providers: [
     provideBrowserGlobalErrorListeners(),
-    provideClientHydration(withEventReplay())
+    provideClientHydration(withEventReplay()),
+    provideHttpClient()
   ],
   bootstrap: [App]
 })

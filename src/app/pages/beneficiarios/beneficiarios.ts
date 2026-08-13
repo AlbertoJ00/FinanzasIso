@@ -57,7 +57,6 @@ import { ConfirmDialogComponent, ConfirmDialogData } from '../../components/conf
                   </i>
                 </th>
                 <th>Identidad</th>
-                <th>RFC/Documento</th>
                 <th>Contacto</th>
                 <th>Banco</th>
                 <th>Estado</th>
@@ -71,9 +70,7 @@ import { ConfirmDialogComponent, ConfirmDialogData } from '../../components/conf
                   <div style="font-size: 0.85rem; color: var(--color-text-secondary);">{{ b.tipoDocumento }}</div>
                   <div style="font-size: 0.9rem; font-weight: 500;">{{ b.numeroDocumento }}</div>
                 </td>
-                <td style="font-family: monospace; font-size: 0.9rem; letter-spacing: 0.05em;">
-                  {{ b.numeroDocumento }}
-                </td>
+
                 <td>
                   <div style="display: flex; align-items: center; gap: 0.25rem; font-size: 0.85rem; color: var(--color-text-secondary); margin-bottom: 0.25rem;">
                     <i class="material-icons" style="font-size: 1rem;">phone</i>
@@ -99,6 +96,7 @@ import { ConfirmDialogComponent, ConfirmDialogData } from '../../components/conf
                   </span>
                 </td>
                 <td style="text-align: right;">
+                  <button class="icon-btn" title="Ver detalle" [routerLink]="['/beneficiarios', b.id]"><i class="material-icons">visibility</i></button>
                   <button class="icon-btn edit" title="Editar" (click)="onEditBeneficiario(b)">
                     <i class="material-icons">edit</i>
                   </button>
